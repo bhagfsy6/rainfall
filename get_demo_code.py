@@ -3,133 +3,163 @@ import time
 import os
 import re
 import sys
-import random
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ==================== SESSION SETUP ====================
+# ==================== SESSION WITH RETRIES & BROWSER MIMIC ====================
 def create_session():
     session = requests.Session()
-    retries = Retry(total=5, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504, 403])
+    retries = Retry(
+        total=3,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"]
+    )
     session.mount("https://", HTTPAdapter(max_retries=retries))
+    
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+        "Origin": "https://temp-mail.org",
+        "Referer": "https://temp-mail.org/",
+        "Connection": "keep-alive",
     })
     return session
 
-# ==================== 1SECMAIL TEMP EMAIL ====================
-def get_random_email(session):
+# ==================== TEMP-MAIL.ORG (web2 unofficial API – exact from your Go) ====================
+BASE_URL = "https://web2.temp-mail.org"
+
+def create_temp_mailbox(session):
+    print("→ POST /mailbox ...")
     try:
-        resp = session.get(
-            "https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1",
-            timeout=15
+        # Pre-warm: GET main page (mimic user visiting site)
+        session.get("https://temp-mail.org/en/", timeout=10)
+        
+        resp = session.post(
+            f"{BASE_URL}/mailbox",
+            json={},  # empty body like in Go
+            timeout=30  # longer timeout in case it's slow
         )
-        resp.raise_for_status()
-        emails = resp.json()
-        if emails and "@" in emails[0]:
-            email = emails[0]
-            print(f"✅ Generated: {email}")
-            return email
-        raise ValueError("No valid email returned")
-    except Exception as e:
-        print(f"❌ genRandomMailbox failed: {e}")
-        # Fallback random
-        domains = ["1secmail.com", "1secmail.net", "esiix.com", "wwjmp.com", "1secmail.org"]
-        local = ''.join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=10))
-        email = f"{local}@{random.choice(domains)}"
-        print(f"⚠️ Using fallback: {email}")
-        return email
+        print(f"← Status: {resp.status_code}")
+        
+        if resp.status_code != 200:
+            print(f"Body preview: {resp.text[:400]}")
+            resp.raise_for_status()
+        
+        data = resp.json()
+        token = data.get("token")
+        email = data.get("mailbox")
+        
+        if not token or not email:
+            raise ValueError("Missing 'token' or 'mailbox' in JSON")
+        
+        print(f"✅ Mailbox created: {email}")
+        return email, token
+    
+    except requests.Timeout:
+        print("⏰ TIMEOUT on /mailbox – endpoint may be blocking or extremely slow")
+        raise
+    except requests.RequestException as e:
+        print(f"Network/Request error: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Status: {e.response.status_code}")
+            print(f"Body: {e.response.text[:600]}")
+        raise
+    except ValueError as ve:
+        print(f"JSON/Format error: {ve}")
+        print(f"Raw response: {resp.text if 'resp' in locals() else 'No response'}")
+        raise
 
 
-def split_email(email):
-    return email.split("@", 1)
-
-
-def get_messages(session, login, domain):
+def get_messages(session, token):
     try:
-        url = f"https://www.1secmail.com/api/v1/?action=getMessages&login={login}&domain={domain}"
-        resp = session.get(url, timeout=10)
-        if resp.status_code == 200:
-            return resp.json()
-        print(f"getMessages HTTP {resp.status_code}")
-        return []
+        headers = {"Authorization": f"Bearer {token}"}
+        resp = session.get(f"{BASE_URL}/messages", headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"/messages HTTP {resp.status_code} - {resp.text[:200]}")
+            return []
+        data = resp.json()
+        return data.get("messages", [])
     except Exception as e:
-        print(f"getMessages error: {e}")
+        print(f"get_messages failed: {e}")
         return []
 
 
-def read_message(session, login, domain, msg_id):
+def read_message(session, token, msg_id):
     try:
-        url = f"https://www.1secmail.com/api/v1/?action=readMessage&login={login}&domain={domain}&id={msg_id}"
-        resp = session.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("textBody") or data.get("htmlBody") or data.get("body", "")
-        print(f"readMessage HTTP {resp.status_code}")
-        return ""
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"{BASE_URL}/messages/{msg_id}"
+        resp = session.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"read {msg_id} HTTP {resp.status_code}")
+            return ""
+        data = resp.json()
+        return data.get("bodyHtml") or data.get("bodyPreview") or ""
     except Exception as e:
-        print(f"readMessage error: {e}")
+        print(f"read_message {msg_id} error: {e}")
         return ""
 
 
-# ==================== CODE EXTRACTION & TELEGRAM ====================
+# ==================== CODE & TELEGRAM (same as before) ====================
 def extract_demo_code(body):
     match = re.search(r'Ваш тестовый код:\s*(\d{12,15})', body, re.IGNORECASE | re.DOTALL)
-    return match.group(1) if match else None
+    if match:
+        return match.group(1)
+    return None
 
 
 def send_to_telegram(code, email):
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     chat_id = os.getenv('TELEGRAM_CHANNEL_ID')
     if not token or not chat_id:
-        print("⚠️ Telegram vars missing")
+        print("⚠️ Telegram secrets missing")
         return False
-    text = (
-        f"🆕 <b>Новый демо-код hidemyname</b>\n\n"
-        f"📧 Email: <code>{email}</code>\n"
-        f"🔑 Код: <code>{code}</code>\n"
-        f"⏰ Получено: {time.strftime('%d.%m.%Y %H:%M:%S UTC')}\n"
-        f"✅ Работает 24 часа"
-    )
+    
+    text = f"🆕 Новый демо-код\nEmail: {email}\nКод: {code}\n⏰ {time.strftime('%d.%m.%Y %H:%M:%S')}"
+    
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
-            timeout=12
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=10
         )
         if resp.status_code == 200:
-            print("✅ Отправлено в Telegram")
+            print("✅ Sent to channel")
             return True
-        print(f"Telegram fail: {resp.status_code} {resp.text}")
+        print(f"Telegram fail: {resp.text}")
         return False
     except Exception as e:
         print(f"Telegram error: {e}")
         return False
 
 
-# ==================== MAIN ====================
+# ==================== MAIN FLOW ====================
 def main_function():
-    print("\n🚀 Получение демо-кода (1secmail API)")
+    print("\n🚀 Запуск (temp-mail.org web2 API)")
     print("⏱", time.strftime("%Y-%m-%d %H:%M:%S UTC"))
     
     session = create_session()
     
-    print("🌐 Создание временного email...")
-    email = get_random_email(session)
-    login, domain = split_email(email)
+    print("🌐 Создание временного ящика...")
+    try:
+        email, token = create_temp_mailbox(session)
+    except Exception as e:
+        print(f"Creation completely failed: {e}")
+        return
     
-    print("🌐 Проверка hidemyname...")
+    print("🌐 Подключение к hidemyname...")
     check_url = 'https://hdmn.cloud/ru/demo/'
     
     try:
         resp = session.get(check_url, timeout=20)
         resp.raise_for_status()
         if 'Ваша электронная почта' not in resp.text:
-            print("⚠️ Форма не найдена (блокировка/изменения?)")
+            print("⚠️ Форма не найдена")
             return
         
-        print("✅ Сервис OK")
+        print("✅ Сервис доступен")
         print("📨 Отправка запроса...")
         
         post_resp = session.post(
@@ -140,54 +170,50 @@ def main_function():
         post_resp.raise_for_status()
         
         if 'Ваш код выслан на почту' in post_resp.text:
-            print('\n' + '✅' * 30)
-            print('✅ Запрос успешен — ждём письмо (до 12 мин)')
-            print('✅' * 30)
+            print('\n✅' * 8 + " Код запрошен – ждём 12 мин " + '✅' * 8)
             
             time.sleep(30)
             
-            start = time.time()
-            found = False
-            seen = set()
+            start_time = time.time()
+            code_found = False
+            seen_ids = set()
             
-            while time.time() - start < 720:
-                msgs = get_messages(session, login, domain)
-                if msgs:
-                    print(f"📬 Сообщений: {len(msgs)}")
-                    for msg in sorted(msgs, key=lambda x: x.get('date', ''), reverse=True):
-                        mid = msg.get('id')
-                        if mid in seen:
+            while time.time() - start_time < 720:
+                messages = get_messages(session, token)
+                if messages:
+                    print(f"📬 {len(messages)} сообщений")
+                    for msg in messages:
+                        msg_id = msg.get("_id")
+                        if not msg_id or msg_id in seen_ids:
                             continue
-                        body = read_message(session, login, domain, mid)
+                        body = read_message(session, token, msg_id)
                         code = extract_demo_code(body)
                         if code:
-                            print(f'\n🎉 КОД: {code}')
+                            print(f"🎉 КОД: {code}")
                             send_to_telegram(code, email)
-                            found = True
+                            code_found = True
                             break
-                        seen.add(mid)
-                if found:
+                        seen_ids.add(msg_id)
+                if code_found:
                     break
                 time.sleep(20)
             
-            if not found:
-                print('⏰ Не пришло за 12 мин')
-                print(f'Проверь: {email}')
+            if not code_found:
+                print("⏰ Код не пришёл")
+                print(f"Email: {email}")
         else:
-            print("❌ Нет 'Ваш код выслан' в ответе")
-            print(f"Ответ: {post_resp.text}...")
+            print("❌ Нет фразы о коде в ответе")
+            print(post_resp.text)
     
-    except requests.RequestException as e:
-        print(f"❌ Сеть ошибка: {type(e).__name__} {e}")
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"Ошибка в hidemyname части: {e}")
 
 
 if __name__ == "__main__":
     try:
         main_function()
     except KeyboardInterrupt:
-        print("\n⚠️ Прервано")
+        print("\nПрервано")
     except Exception as e:
         print(f"Критическая ошибка: {e}")
         sys.exit(1)
