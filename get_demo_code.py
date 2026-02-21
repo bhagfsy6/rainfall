@@ -135,8 +135,8 @@ def main_function():
             timeout=20
         )
         post_resp.raise_for_status()
-        
-        if 'Ваш код выслан на почту' in post_resp.text:
+        print(post_resp.text)
+        if 'код' in post_resp.text:
             print('\n' + '✅' * 30)
             print('✅ Код запрошен — ждём письмо (до 12 мин)')
             print('✅' * 30)
