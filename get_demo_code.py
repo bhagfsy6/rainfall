@@ -166,7 +166,7 @@ def main_function():
                 print(f'Проверь вручную: {email}')
         else:
             print("❌ Не 'Ваш код выслан' в ответе")
-            print(f"Ответ: {post_resp.text[:200]}...")
+            print(f"Ответ: {post_resp.text}...")
     
     except requests.RequestException as e:
         print(f"❌ Ошибка сети с hidemyname: {type(e).__name__}: {e}")
