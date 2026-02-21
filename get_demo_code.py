@@ -175,7 +175,7 @@ def main_function():
                 print(f'Проверь: {email}')
         else:
             print("❌ Нет 'Ваш код выслан' в ответе")
-            print(f"Ответ: {post_resp.text[:300]}...")
+            print(f"Ответ: {post_resp.text}...")
     
     except requests.RequestException as e:
         print(f"❌ Сеть ошибка: {type(e).__name__} {e}")
